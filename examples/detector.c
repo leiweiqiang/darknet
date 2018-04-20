@@ -1,4 +1,5 @@
 #include "darknet.h"
+#include <mysql.h>
 
 static int coco_ids[] = {1,2,3,4,5,6,7,8,9,10,11,13,14,15,16,17,18,19,20,21,22,23,24,25,27,28,31,32,33,34,35,36,37,38,39,40,41,42,43,44,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,67,70,72,73,74,75,76,77,78,79,80,81,82,84,85,86,87,88,89,90};
 extern void verify_detector(char *datacfg, char *cfgfile, char *weightfile, float thresh, float hier_thresh);
@@ -516,7 +517,7 @@ void save_results_txt_file(image im, detection *dets, int num, float thresh, cha
         }
 
         if(class >= 0){
-            fprintf(fp, "%d\n", j);
+            fprintf(fp, "%d\n", i);
             fprintf(fp, "%.6f\n", dets[i].prob[class]);
             box b = dets[i].bbox;
             int left  = (b.x-b.w/2.)*im.w;
@@ -529,6 +530,93 @@ void save_results_txt_file(image im, detection *dets, int num, float thresh, cha
     fclose(fp);
 }
 
+MYSQL mysql, *sock;
+
+void _init_sql(){
+    const char * host = "192.168.1.55";
+    const char * user = "dl";
+    const char * passwd = "123456";
+    const char * db = "ai";
+    unsigned int port = 3306;
+    const char * unix_socket = NULL;
+    unsigned long client_flag = 0;
+    mysql_init(&mysql);
+    if ( (sock = mysql_real_connect(&mysql, host, user, passwd, db, port, unix_socket, client_flag) ) == NULL )
+    {
+        printf("fail to connect mysql \n");
+        fprintf(stderr, " %s\n", mysql_error(&mysql));
+        exit(1);
+    }
+}
+
+void _close_sql(){
+    mysql_close(sock); 
+}
+
+int get_frame_id(char* filename){
+  char buff[1024] = {0};
+  sprintf(buff, "%s", filename);
+  char* dot_index = strstr(buff, ".");
+  memset(dot_index, 0x00, 1);
+  
+  return atoi(dot_index-6);
+}
+
+void save_results_to_db(image im, detection *dets, int num, float thresh, char **names, 
+    image **alphabet, int classes,  
+    char* filename, char* model_id, char* movie_id, char **class_list){
+    
+
+
+  int i=0,j=0;
+  char sql[1024] = {0};
+     for(i = 0; i < num; i++){
+         int class = -1;
+          float confidence =0.0;
+         for(j = 0; j < classes; ++j){
+             if (dets[i].prob[j] > thresh){
+                 if (class < 0) {
+                     //sprintf(labelstr, "%s_%.2f", names[j], dets[i].prob[j]);
+                     //strcat(labelstr, names[j]);
+                     class = j;
+                     confidence =dets[i].prob[class] ;
+                     printf("confidence = %f\n", confidence);
+                 }
+               //  printf("%s: %.0f%%\n", names[j], probs[j]*100);
+             }
+         }
+  
+         if(class >= 0){
+          
+            int class_index = class;
+            //float* confidence =dets[i].prob[class] ;
+            //printf("confidence = %f", dets[i].prob[class]);
+             box b = dets[i].bbox;
+             int x1  = (b.x-b.w/2.)*im.w;
+             int x2 = (b.x+b.w/2.)*im.w;
+             int y1   = (b.y-b.h/2.)*im.h;
+             int y2   = (b.y+b.h/2.)*im.h;
+              //   printf("model_id = %s\n", model_id);
+              //    printf("movie_id = %s\n", movie_id);
+              //    printf("get_frame_id = %d\n", get_frame_id(filename));
+             memset(sql, 0x00, 1024);
+                          sprintf(sql, "insert into results (model_id,movie_id,class_id,frame_id,class_index,confidence,filename,x1,x2,y1,y2) values (%s,%s,%s,%d,%d,%f,'%s',%d,%d,%d,%d)",
+                                  model_id,
+                                  movie_id,
+                                  class_list[class_index],
+                                  get_frame_id(filename),
+                                  class_index,
+                                  confidence,
+                                  filename,
+                                  x1,x2,y1,y2);
+                          printf("%s\n", sql);
+                          mysql_query(&mysql, sql);
+                          mysql_affected_rows(&mysql); 
+
+         }
+     }
+}
+
 void verify_detector(char *datacfg, char *cfgfile, char *weightfile, float thresh, float hier_thresh)
 {
 
@@ -537,7 +625,11 @@ void verify_detector(char *datacfg, char *cfgfile, char *weightfile, float thres
        // fprintf(stderr, "valid: %s\n", valid);
     char *name_list = option_find_str(options, "names", "data/names.list");
     char **names = get_labels(name_list);
-
+    char *model_id = option_find_str(options, "model_id", "0");
+    char *movie_id = option_find_str(options, "movie_id", "0");
+    char *class_id_list = option_find_str(options, "class_id_list", "./class_id_list.txt");
+    char **class_list = get_labels(class_id_list);
+_init_sql();
 
     image **alphabet = load_alphabet();
     network *net = load_network(cfgfile, weightfile, 0);
@@ -555,6 +647,7 @@ void verify_detector(char *datacfg, char *cfgfile, char *weightfile, float thres
     int total =plist->size;
     printf("total = %d\n", total);
     for(i=0; i<total;i++){
+         time=what_time_is_it_now();
         strncpy(input, paths[i], 256);
 
         image im = load_image_color(input,0,0);
@@ -567,26 +660,28 @@ void verify_detector(char *datacfg, char *cfgfile, char *weightfile, float thres
 
         
         float *X = sized.data;
-        time=what_time_is_it_now();
+
         network_predict(net, X);
-        printf("%s: Predicted in %f seconds.\n", input, what_time_is_it_now()-time);
         int nboxes = 0;
         detection *dets = get_network_boxes(net, im.w, im.h, thresh, hier_thresh, 0, 1, &nboxes);
         //printf("%d\n", nboxes);
         //if (nms) do_nms_obj(boxes, probs, l.w*l.h*l.n, l.classes, nms);
         if (nms) do_nms_sort(dets, nboxes, l.classes, nms);
-        draw_detections(im, dets, nboxes, thresh, names, alphabet, l.classes);
+        //draw_detections(im, dets, nboxes, thresh, names, alphabet, l.classes);
         char buff[256];
         char fname[256];
         get_filename(paths[i], fname);
-        sprintf(buff, "results/img/%s", fname);
-        save_image(im, buff);
+        //sprintf(buff, "results/img/%s", fname);
+        //save_image(im, buff);
         sprintf(buff, "results/txt/%s.txt", fname);
-        save_results_txt_file(im, dets, nboxes, thresh, names, alphabet, l.classes, buff);
+        //save_results_txt_file(im, dets, nboxes, thresh, names, alphabet, l.classes, buff);
+        save_results_to_db(im, dets, nboxes, thresh, names, alphabet, l.classes, buff, model_id, movie_id, class_list);
         free_detections(dets, nboxes);
         free_image(im);
         free_image(sized);
+        printf("%s: Predicted in %f seconds.\n", input, what_time_is_it_now()-time);
     }
+    _close_sql();
 }
 
 void validate_detector_recall(char *cfgfile, char *weightfile)
